@@ -2,13 +2,26 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import axios from "axios";
 
+const API = "http://localhost:3000";
+const CATEGORIES = [
+  { value: "plumbing", label: "Plumbing" },
+  { value: "electrical", label: "Electrical" },
+  { value: "cleanliness", label: "Cleanliness" },
+  { value: "water", label: "Water Supply" },
+  { value: "maintenance", label: "Maintenance" },
+  { value: "other", label: "Other" },
+];
+
 function DashBoardAdmin() {
+  const [wardenName, setWardenName] = useState("");
+  const [hostel, setHostel] = useState("");
   const [complaints, setComplaints] = useState([]);
+  const [byCategory, setByCategory] = useState({});
+  const [activeTab, setActiveTab] = useState("all");
   const navigate = useNavigate();
 
   useEffect(() => {
     const token = localStorage.getItem("token");
-
     if (!token) {
       navigate("/");
       return;
@@ -16,95 +29,157 @@ function DashBoardAdmin() {
 
     async function fetchData() {
       try {
-        const compRes = await axios.get(
-          "http://localhost:3000/admin",
-          {
-            headers: { authorization: token },
-          }
-        );
+        const userRes = await axios.get(`${API}/me`, {
+          headers: { authorization: token },
+        });
+        if (userRes.data.role !== "warden") {
+          localStorage.removeItem("token");
+          navigate("/");
+          return;
+        }
+        setWardenName(userRes.data.username);
+        setHostel(userRes.data.hostel || "");
 
-        setComplaints(compRes.data.allComplaints);
+        const compRes = await axios.get(`${API}/warden/complaints`, {
+          headers: { authorization: token },
+        });
+        setComplaints(compRes.data.complaints || []);
+        setByCategory(compRes.data.byCategory || {});
       } catch (err) {
         console.error(err);
       }
     }
-
     fetchData();
   }, [navigate]);
 
-  // 🔥 Mark Complaint as Done
   async function markAsDone(id) {
     try {
-      await axios.put(
-        `http://localhost:3000/markedDone/${id}`,
-        {},
-        {
-          headers: {
-            authorization: localStorage.getItem("token"),
-          },
-        }
-      );
-
-      // Update UI instantly
+      await axios.put(`${API}/markedDone/${id}`, {}, {
+        headers: { authorization: localStorage.getItem("token") },
+      });
       setComplaints((prev) =>
-        prev.map((item) =>
-          item._id === id ? { ...item, done: true } : item
-        )
+        prev.map((item) => (item._id === id ? { ...item, done: true } : item))
       );
+      setByCategory((prev) => {
+        const next = {};
+        Object.keys(prev).forEach((cat) => {
+          next[cat] = prev[cat].map((c) =>
+            c._id === id ? { ...c, done: true } : c
+          ).filter((c) => !c.done);
+        });
+        return next;
+      });
     } catch (err) {
       console.error(err);
     }
   }
 
-  const pendingComplaints = complaints.filter(
-    (item) => !item.done
-  );
+  function getCategoryLabel(val) {
+    return CATEGORIES.find((c) => c.value === val)?.label || val;
+  }
+
+  const listToShow =
+    activeTab === "all"
+      ? complaints
+      : byCategory[activeTab] || [];
+
+  const stats = {
+    total: complaints.length,
+    urgent: complaints.filter((c) => c.urgent).length,
+    byCat: Object.fromEntries(
+      CATEGORIES.map((c) => [c.value, (byCategory[c.value] || []).length])
+    ),
+  };
 
   return (
     <div className="dashboard">
-      <h1 className="welcome">Welcome, Admin</h1>
+      <div className="dashboard-header-warden">
+        <div>
+          <h1 className="welcome">Welcome, {wardenName || "Warden"}</h1>
+          <p className="dashboard-sub">
+            Warden • {hostel} • Pending: {stats.total}
+          </p>
+        </div>
+        <button className="btn danger logout-btn" onClick={() => { localStorage.removeItem("token"); localStorage.removeItem("role"); navigate("/"); }}>
+          🔓 Logout
+        </button>
+      </div>
 
-      <div className="card recent-complaints">
-        <h2>Recent Complaints</h2>
+      <div className="warden-stats">
+        <div className="stat-card">
+          <span className="stat-value">{stats.total}</span>
+          <span className="stat-label">Total</span>
+        </div>
+        <div className="stat-card urgent">
+          <span className="stat-value">{stats.urgent}</span>
+          <span className="stat-label">Urgent</span>
+        </div>
+      </div>
+
+      <div className="card warden-card">
+        <h2>Complaints by Category</h2>
+
+        <div className="category-tabs">
+          <button
+            className={`cat-tab ${activeTab === "all" ? "active" : ""}`}
+            onClick={() => setActiveTab("all")}
+          >
+            All
+          </button>
+          {CATEGORIES.map((c) => (
+            <button
+              key={c.value}
+              className={`cat-tab ${activeTab === c.value ? "active" : ""}`}
+              onClick={() => setActiveTab(c.value)}
+            >
+              {c.label}
+              {stats.byCat[c.value] > 0 && (
+                <span className="tab-count">{stats.byCat[c.value]}</span>
+              )}
+            </button>
+          ))}
+        </div>
 
         <div className="recent-complaints-content">
-          {pendingComplaints.length === 0 ? (
-            <p>No complaints yet.</p>
+          {listToShow.length === 0 ? (
+            <div className="empty-state">
+              <span className="empty-icon">✅</span>
+              <p>
+                {activeTab === "all"
+                  ? "No pending complaints in your hostel."
+                  : `No ${getCategoryLabel(activeTab)} complaints.`}
+              </p>
+            </div>
           ) : (
-            pendingComplaints.map((item) => (
+            listToShow.map((item) => (
               <div
                 key={item._id}
-                className={`complaint-item ${
-                  item.urgent ? "urgent" : ""
-                }`}
+                className={`complaint-item ${item.urgent ? "urgent" : ""}`}
               >
                 <div>
+                  <span className="category-badge">
+                    {getCategoryLabel(item.category)}
+                  </span>
                   <h4>{item.title}</h4>
                   <p>
                     {item.hostel}, Room {item.room_no}
+                    {item.userId?.username && (
+                      <> • by {item.userId.username}</>
+                    )}
                   </p>
                   <p>Status: Pending</p>
                 </div>
-
-                {item.urgent && (
-                  <span className="urgent-badge">
-                    Urgent
-                  </span>
-                )}
-
-                <label
-                  style={{ marginLeft: "60px" }}
-                  className="checkbox"
-                >
-                  <input
-                    type="checkbox"
-                    checked={item.done}
-                    onChange={() =>
-                      markAsDone(item._id)
-                    }
-                  />
-                  Mark as done
-                </label>
+                <div className="item-actions">
+                  {item.urgent && <span className="urgent-badge">Urgent</span>}
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={item.done}
+                      onChange={() => markAsDone(item._id)}
+                    />
+                    Mark done
+                  </label>
+                </div>
               </div>
             ))
           )}

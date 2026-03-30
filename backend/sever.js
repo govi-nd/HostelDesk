@@ -8,48 +8,92 @@ const cors = require("cors");
 
 const app = express();
 const JWT_SECRET = "terimaakichut";
-const JWT_SECRET2 = "nai batao gya";
+const JWT_SECRET_WARDEN = "nai batao gya";
+
 app.use(cors());
 app.use(express.json());
 app.use(cookieParser());
+
 const { UserModel, ComplaintModel } = require("./db");
-const { da } = require("zod/v4/locales");
+
+// Shared constants (for API consistency)
+const HOSTELS = ["A-Block", "B-Block", "C-Block", "D-Block", "Girls Hostel"];
+const CATEGORIES = ["plumbing", "electrical", "cleanliness", "water", "maintenance", "other"];
+
 mongoose
-  .connect("mongodb://localhost:27017/project-db")
-  .then(() => {
-    console.log("mongodb connected successfully");
-  })
-  .catch((err) => {
-    console.log("connection error", err);
-  });
+  .connect("mongodb://localhost:27017/new-db-for-project")
+  .then(() => console.log("mongodb connected successfully"))
+  .catch((err) => console.log("connection error", err));
 
 // ================= SIGNUP =================
-app.post("/signup", async function (req, res) {
+// Student signup - hostel required (complaints auto-linked to student's hostel)
+app.post("/signup/student", async function (req, res) {
   try {
-    const { username, password } = req.body;
+    const { username, password, hostel } = req.body;
     const requiredBody = z.object({
       username: z.string().min(3).max(100),
       password: z.string().min(3).max(12),
+      hostel: z.string().min(1),
     });
     const parsedData = requiredBody.safeParse(req.body);
     if (!parsedData.success) {
-      return res.send({
-        message: "invalid format",
-        error: parsedData.error,
-      });
+      return res.status(400).json({ message: "Invalid format. Hostel is required." });
+    }
+
+    if (!HOSTELS.includes(hostel)) {
+      return res.status(400).json({ message: "Invalid hostel" });
     }
 
     const existingUser = await UserModel.findOne({ username });
-
     if (existingUser) {
-      return res.send({ message: "Username already exists" });
+      return res.status(400).json({ message: "Username already exists" });
     }
+
     const hashedPassword = await bcrypt.hash(password, 5);
     await UserModel.create({
-      username: username,
+      username,
       password: hashedPassword,
+      role: "student",
+      hostel,
     });
-    const token = jwt.sign({ username }, JWT_SECRET);
+    const token = jwt.sign({ username, role: "student" }, JWT_SECRET);
+    return res.status(200).json({ token });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Warden signup - requires hostel
+app.post("/signup/warden", async function (req, res) {
+  try {
+    const { username, password, hostel } = req.body;
+    const requiredBody = z.object({
+      username: z.string().min(3).max(100),
+      password: z.string().min(3).max(12),
+      hostel: z.string().min(1),
+    });
+    const parsedData = requiredBody.safeParse(req.body);
+    if (!parsedData.success) {
+      return res.status(400).json({ message: "Invalid format. Hostel is required." });
+    }
+
+    if (!HOSTELS.includes(hostel)) {
+      return res.status(400).json({ message: "Invalid hostel" });
+    }
+
+    const existingUser = await UserModel.findOne({ username });
+    if (existingUser) {
+      return res.status(400).json({ message: "Username already exists" });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 5);
+    await UserModel.create({
+      username,
+      password: hashedPassword,
+      role: "warden",
+      hostel,
+    });
+    const token = jwt.sign({ username, role: "warden", hostel }, JWT_SECRET_WARDEN);
     return res.status(200).json({ token });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -60,94 +104,185 @@ app.post("/signup", async function (req, res) {
 app.post("/signin/student", async function (req, res) {
   const { username, password } = req.body;
   try {
-    const existingUser = await UserModel.findOne({ username });
+    const existingUser = await UserModel.findOne({ username, role: "student" });
+    if (!existingUser) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
     const passMatch = await bcrypt.compare(password, existingUser.password);
-    const token = jwt.sign({ username }, JWT_SECRET);
+    if (!passMatch) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
+    const token = jwt.sign({ username, role: "student" }, JWT_SECRET);
     return res.status(200).json({ token });
   } catch (error) {
     return res.status(401).json({ message: "Invalid credentials" });
   }
 });
 
-app.post("/signin/admin",function(req,res){
-  const data=req.body;
-  if(data.username==="admin" && data.password==="147258369"){
-    const token = jwt.sign( data.username , JWT_SECRET2);
-    res.send({message:"login successful",token});
+app.post("/signin/warden", async function (req, res) {
+  const { username, password } = req.body;
+  try {
+    const existingUser = await UserModel.findOne({ username, role: "warden" });
+    if (!existingUser) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
+    const passMatch = await bcrypt.compare(password, existingUser.password);
+    if (!passMatch) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
+    const token = jwt.sign(
+      { username, role: "warden", hostel: existingUser.hostel },
+      JWT_SECRET_WARDEN
+    );
+    return res.status(200).json({ token });
+  } catch (error) {
+    return res.status(401).json({ message: "Invalid credentials" });
   }
-})
+});
 
-function auth(req, res, next) {
-  // console.log(req.headers.authorization);
+// ================= AUTH MIDDLEWARES =================
+function authStudent(req, res, next) {
   const token = req.headers.authorization;
   if (!token) {
     return res.status(401).json({ message: "Please sign in first" });
   }
-
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
     req.username = decoded.username;
+    req.role = decoded.role;
     next();
   } catch (err) {
     return res.status(401).json({ message: "Invalid token" });
   }
 }
-app.get("/me", auth, async function (req, res) {
-  const existingUser = await UserModel.findOne({ username: req.username });
 
-  res.json({
-    username: existingUser.username,
-  });
+function authWarden(req, res, next) {
+  const token = req.headers.authorization;
+  if (!token) {
+    return res.status(401).json({ message: "Please sign in first" });
+  }
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET_WARDEN);
+    req.username = decoded.username;
+    req.role = "warden";
+    req.wardenHostel = decoded.hostel;
+    next();
+  } catch (err) {
+    return res.status(401).json({ message: "Invalid token" });
+  }
+}
+
+// ================= ROUTES =================
+app.get("/hostels", (req, res) => {
+  res.json(HOSTELS);
 });
 
+app.get("/categories", (req, res) => {
+  res.json(CATEGORIES);
+});
 
-
-app.post("/new-complaint",auth,async function (req,res){
-  try{
-    const user = await UserModel.findOne({username:req.username});
-  const id =  user._id;
-  const data = req.body;
-  console.log(data);
-  await ComplaintModel.create({
-    userId:id,
-    title:data.title,
-    urgent:data.urgent,
-    hostel:data.hostel,
-    room_no:data.room_no,
-    done:data.done,
-    });
-    
-
-    res.send({message:"Complaint Added"});
-  }catch(error){
-    res.send({error});
+app.get("/me", async (req, res) => {
+  const token = req.headers.authorization;
+  if (!token) {
+    return res.status(401).json({ message: "Please sign in first" });
   }
-})
+  try {
+    let decoded;
+    try {
+      decoded = jwt.verify(token, JWT_SECRET);
+    } catch {
+      decoded = jwt.verify(token, JWT_SECRET_WARDEN);
+    }
+    const user = await UserModel.findOne({ username: decoded.username });
+    if (!user) {
+      return res.status(401).json({ message: "User not found" });
+    }
+    res.json({
+      username: user.username,
+      role: user.role,
+      hostel: user.hostel,
+    });
+  } catch (err) {
+    return res.status(401).json({ message: "Invalid token" });
+  }
+});
 
-app.get("/get-complaints", auth, async function (req, res) {
+app.post("/new-complaint", authStudent, async function (req, res) {
   try {
     const user = await UserModel.findOne({ username: req.username });
-    const id = user._id;
+    const { title, room_no, urgent, category } = req.body;
 
-    const complaints = await ComplaintModel.find({ userId: id });
-    console.log(complaints);
-    res.json(complaints);   // ✅ send array directly
+    if (!category || !CATEGORIES.includes(category)) {
+      return res.status(400).json({ message: "Invalid category" });
+    }
+    if (!user.hostel || !HOSTELS.includes(user.hostel)) {
+      return res.status(400).json({ message: "Your hostel is not set. Please contact admin." });
+    }
+
+    const complaint = await ComplaintModel.create({
+      userId: user._id,
+      title,
+      category,
+      urgent: !!urgent,
+      hostel: user.hostel,
+      room_no,
+      done: false,
+    });
+    return res.status(201).json(complaint);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.get("/get-complaints", authStudent, async function (req, res) {
+  try {
+    const user = await UserModel.findOne({ username: req.username });
+    const complaints = await ComplaintModel.find({ userId: user._id }).sort({
+      createdAt: -1,
+    });
+    res.json(complaints);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.get("/admin", async function(req,res){
-  const allComplaints = await ComplaintModel.find({})
-  res.send({allComplaints});
-})
-app.put("/markedDone/:id", async (req, res) => {
+// Warden: complaints for their hostel only, grouped by category
+app.get("/warden/complaints", authWarden, async function (req, res) {
   try {
-    await ComplaintModel.findByIdAndUpdate(
-      req.params.id,
-      { done: true }
-    );
+    const complaints = await ComplaintModel.find({
+      hostel: req.wardenHostel,
+      done: false,
+    })
+      .sort({ urgent: -1, createdAt: -1 })
+      .populate("userId", "username")
+      .lean();
 
+    const byCategory = {};
+    CATEGORIES.forEach((c) => (byCategory[c] = []));
+    complaints.forEach((c) => {
+      if (byCategory[c.category]) byCategory[c.category].push(c);
+    });
+
+    res.json({
+      hostel: req.wardenHostel,
+      complaints,
+      byCategory,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put("/markedDone/:id", authWarden, async (req, res) => {
+  try {
+    const complaint = await ComplaintModel.findById(req.params.id);
+    if (!complaint) {
+      return res.status(404).json({ message: "Complaint not found" });
+    }
+    if (complaint.hostel !== req.wardenHostel) {
+      return res.status(403).json({ message: "Not your hostel" });
+    }
+    await ComplaintModel.findByIdAndUpdate(req.params.id, { done: true });
     res.json({ message: "Marked as done" });
   } catch (err) {
     res.status(500).json({ error: err.message });
